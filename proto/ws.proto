@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright Authors of Watershed
+
+syntax = "proto3";
+package ws;
+option go_package = "internal/ws/pb";
+
+service Watershed {
+  rpc HandleUpdate(MapUpdateReq) returns (MapUpdateResp);
+  rpc FullSync(FullSyncReq) returns (FullSyncResp);
+  //rpc Healthcheck(HealthcheckReq) returns (HealthcheckResp);
+}
+
+message MapUpdateReq {
+	uint32 MapType  =  1;
+	int64 SentAt =2;
+  repeated MapUpdateEvent events = 3;
+}
+
+
+message MapUpdateResp {
+  bool ok =1;
+  int64 UpdateLatency =2;
+}
+
+
+message FullSyncReq {
+  uint32 MapType = 1;
+	int64 SentAt = 2;
+}
+
+message FullSyncResp {
+  uint32 MapType =1;
+  repeated MapUpdateEvent events = 2;
+}
+
+message MapUpdateEvent{
+  bytes key = 1;
+  bytes value = 2;
+	uint32 type = 3;
+}
+
+
+
+//message HealthcheckReq {
+//  int32 type = 10;
+//
+//}
+//
+//message HealthcheckResp {
+//  int32 status = 10;
+//
+//}

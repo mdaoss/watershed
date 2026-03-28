@@ -1,0 +1,249 @@
+diff --git a/bpf/lib/common.h b/bpf/lib/common.h
+index b5647166db..6674bef832 100644
+--- a/bpf/lib/common.h
++++ b/bpf/lib/common.h
+@@ -458,7 +458,7 @@ struct egress_gw_policy_key {
+ 
+ struct egress_gw_policy_entry {
+ 	__u32 egress_ip;
+-	__u32 gateway_ip;
++	__u32 gateway_ip[2];
+ };
+ 
+ struct srv6_vrf_key4 {
+diff --git a/bpf/lib/egress_gateway.h b/bpf/lib/egress_gateway.h
+index a6d48c3f4a..b4ed77fd73 100644
+--- a/bpf/lib/egress_gateway.h
++++ b/bpf/lib/egress_gateway.h
+@@ -3,6 +3,7 @@
+ 
+ #pragma once
+ 
++#include "lib/egress_gateway_ha.h"
+ #include "lib/fib.h"
+ #include "lib/identity.h"
+ #include "lib/overloadable.h"
+@@ -29,6 +30,7 @@
+ /* Special values in the policy_entry->egress_ip: */
+ #define EGRESS_GATEWAY_NO_EGRESS_IP (0)
+ 
++
+ static __always_inline
+ int egress_gw_fib_lookup_and_redirect(struct __ctx_buff *ctx, __be32 egress_ip, __be32 daddr,
+ 				      __s8 *ext_err)
+@@ -89,13 +91,20 @@ egress_gw_request_needs_redirect(struct ipv4_ct_tuple *rtuple __maybe_unused,
+ {
+ #if defined(ENABLE_EGRESS_GATEWAY)
+ 	struct egress_gw_policy_entry *egress_gw_policy;
++	__be32 choosen_gw_ip;
++	__be32 saddr, daddr;
++
++
++	 saddr = ipv4_ct_reverse_tuple_saddr(rtuple); 
++	 daddr = ipv4_ct_reverse_tuple_daddr(rtuple); 
+ 
+-	egress_gw_policy = lookup_ip4_egress_gw_policy(ipv4_ct_reverse_tuple_saddr(rtuple),
+-						       ipv4_ct_reverse_tuple_daddr(rtuple));
++	egress_gw_policy = lookup_ip4_egress_gw_policy(saddr, daddr);
+ 	if (!egress_gw_policy)
+ 		return CTX_ACT_OK;
++    
++	choosen_gw_ip = get_ha_gateway(egress_gw_policy->gateway_ip, saddr, daddr);
+ 
+-	switch (egress_gw_policy->gateway_ip) {
++	switch (choosen_gw_ip) {
+ 	case EGRESS_GATEWAY_NO_GATEWAY:
+ 		/* If no gateway is found, drop the packet. */
+ 		return DROP_NO_EGRESS_GATEWAY;
+@@ -103,7 +112,7 @@ egress_gw_request_needs_redirect(struct ipv4_ct_tuple *rtuple __maybe_unused,
+ 		return CTX_ACT_OK;
+ 	}
+ 
+-	*gateway_ip = egress_gw_policy->gateway_ip;
++	*gateway_ip = choosen_gw_ip;
+ 	return CTX_ACT_REDIRECT;
+ #else
+ 	return CTX_ACT_OK;
+@@ -117,13 +126,16 @@ bool egress_gw_snat_needed(__be32 saddr __maybe_unused,
+ {
+ #if defined(ENABLE_EGRESS_GATEWAY)
+ 	struct egress_gw_policy_entry *egress_gw_policy;
++	__be32 choosen_gw_ip;
+ 
+-	egress_gw_policy = lookup_ip4_egress_gw_policy(saddr, daddr);
++	egress_gw_policy = lookup_ip4_egress_gw_policy(saddr, daddr); // STUB
+ 	if (!egress_gw_policy)
+ 		return false;
+ 
+-	if (egress_gw_policy->gateway_ip == EGRESS_GATEWAY_NO_GATEWAY ||
+-	    egress_gw_policy->gateway_ip == EGRESS_GATEWAY_EXCLUDED_CIDR)
++	choosen_gw_ip = get_ha_gateway(egress_gw_policy->gateway_ip, saddr, daddr);
++
++	if (choosen_gw_ip == EGRESS_GATEWAY_NO_GATEWAY ||
++	    choosen_gw_ip == EGRESS_GATEWAY_EXCLUDED_CIDR)
+ 		return false;
+ 
+ 	*snat_addr = egress_gw_policy->egress_ip;
+@@ -137,15 +149,19 @@ static __always_inline
+ bool egress_gw_reply_matches_policy(struct iphdr *ip4 __maybe_unused)
+ {
+ #if defined(ENABLE_EGRESS_GATEWAY)
+-	struct egress_gw_policy_entry *egress_policy;
++	struct egress_gw_policy_entry *egress_gw_policy;
++	__be32 choosen_gw_ip;
+ 
+ 	/* Find a matching policy by looking up the reverse address tuple: */
+-	egress_policy = lookup_ip4_egress_gw_policy(ip4->daddr, ip4->saddr);
+-	if (!egress_policy)
++	egress_gw_policy = lookup_ip4_egress_gw_policy(ip4->daddr, ip4->saddr); // STUB
++	if (!egress_gw_policy)
+ 		return false;
+ 
+-	if (egress_policy->gateway_ip == EGRESS_GATEWAY_NO_GATEWAY ||
+-	    egress_policy->gateway_ip == EGRESS_GATEWAY_EXCLUDED_CIDR)
++	/* Find a matching policy by looking up the reverse address tuple: */
++	choosen_gw_ip = get_ha_gateway(egress_gw_policy->gateway_ip, ip4->saddr, ip4->daddr);
++
++	if (choosen_gw_ip == EGRESS_GATEWAY_NO_GATEWAY ||
++	    choosen_gw_ip == EGRESS_GATEWAY_EXCLUDED_CIDR)
+ 		return false;
+ 
+ 	return true;
+diff --git a/bpf/lib/egress_gateway_ha.h b/bpf/lib/egress_gateway_ha.h
+new file mode 100644
+index 0000000000..fc71b355cc
+--- /dev/null
++++ b/bpf/lib/egress_gateway_ha.h
+@@ -0,0 +1,75 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++/* Copyright Authors of Cilium */
++
++#pragma once
++
++#include "endian.h"
++#include "lib/fib.h"
++#include "lib/identity.h"
++#include "lib/jhash.h"
++#include "lib/overloadable.h"
++
++
++#define MAX_GW_CNT 2 // Max count of GW in BPF map
++
++/* These are special IP values in the CIDR 0.0.0.0/8 range that map to specific
++ * case for in the egress gateway policies handling.
++ */
++
++/* Special values in the policy_entry->gateway_ip: */
++#define EGRESS_GATEWAY_NO_GATEWAY (0)
++#define EGRESS_GATEWAY_EXCLUDED_CIDR_CONST (0x01000000)
++
++/* Special values in the policy_entry->egress_ip: */
++#define EGRESS_GATEWAY_NO_EGRESS_IP (0)
++
++
++// Returns the first value in a 3-element array that is not in the blacklist.
++// 'arr' is a fixed-length array of 3 integers.
++// Returns random available gateway
++static __always_inline __u32 get_ha_gateway(__u32 arr[MAX_GW_CNT], __be32 saddr, __be32 daddr) {
++  __u8  i; // index  for loop
++
++  // Make verifier happy
++  volatile __u32 sarr[MAX_GW_CNT] = {};
++
++  __u64 valid_gw_cnt = 0;
++  __u64 valid_gw_idx[MAX_GW_CNT] = {};
++
++  int selector  = 0;
++  __u32 chosen_gw_id;
++
++  // Make verifier happy
++  sarr[0] = arr[0];
++  sarr[1] = arr[1];
++
++
++    // Filtering non-working gateways on datapath level
++    #pragma unroll
++    for (i = 0; i < MAX_GW_CNT; i++) {
++        if (!(sarr[i] == EGRESS_GATEWAY_NO_GATEWAY ) && !(sarr[i] == EGRESS_GATEWAY_EXCLUDED_CIDR_CONST ))  {
++          valid_gw_idx[valid_gw_cnt] = i;
++          valid_gw_cnt++;
++
++        }
++    }
++
++    //Early exit if no one gateway
++    if (valid_gw_cnt <= 0 ){
++	      return EGRESS_GATEWAY_NO_GATEWAY;
++    }
++
++  // Update hashing HERE - WS
++  // 2-word hash calculation with saddr and daddr as base
++    selector  = jhash_2words(saddr, daddr, 0) % valid_gw_cnt;
++
++    // Verifier-friendly constant-offset access
++    if (selector == 0)  chosen_gw_id = valid_gw_idx[0];
++    if (selector == 1)  chosen_gw_id = valid_gw_idx[1];
++
++    // Verifier-friendly constant-offset access
++    if (chosen_gw_id == 0) return sarr[0];
++    if (chosen_gw_id == 1) return sarr[1];
++
++  return EGRESS_GATEWAY_NO_GATEWAY;
++}
+\ No newline at end of file
+diff --git a/pkg/egressgateway/manager.go b/pkg/egressgateway/manager.go
+index 5119612c8a..dad814178c 100644
+--- a/pkg/egressgateway/manager.go
++++ b/pkg/egressgateway/manager.go
+@@ -189,11 +189,11 @@ func NewEgressGatewayManager(p Params) (out struct {
+ 	if !dcfg.EnableIPv4Masquerade || !dcfg.EnableBPFMasquerade {
+ 		return out, fmt.Errorf("egress gateway requires --%s=\"true\" and --%s=\"true\"", option.EnableIPv4Masquerade, option.EnableBPFMasquerade)
+ 	}
+-
+-	out.Manager, err = newEgressGatewayManager(p)
+-	if err != nil {
+-		return out, err
+-	}
++	// WARN: Only for compatability with sideloaded egress gateway
++	//out.Manager, err = newEgressGatewayManager(p)
++	//if err != nil {
++	//	return out, err
++	//}
+ 
+ 	out.NodeDefines = map[string]string{
+ 		"ENABLE_EGRESS_GATEWAY": "1",
+diff --git a/pkg/maps/egressmap/policy.go b/pkg/maps/egressmap/policy.go
+index 227b761d3e..6d42413d21 100644
+--- a/pkg/maps/egressmap/policy.go
++++ b/pkg/maps/egressmap/policy.go
+@@ -37,8 +37,10 @@ type EgressPolicyKey4 struct {
+ 
+ // EgressPolicyVal4 is the value of an egress policy map.
+ type EgressPolicyVal4 struct {
+-	EgressIP  types.IPv4 `align:"egress_ip"`
+-	GatewayIP types.IPv4 `align:"gateway_ip"`
++	EgressIP types.IPv4 `align:"egress_ip"`
++	// WARN: Only for compatability with sideoaded egress gateway
++	GatewayIP [2]types.IPv4 `align:"gateway_ip"` // WARN: Must be alligned with  C code in Datapath
++
+ }
+ 
+ type PolicyConfig struct {
+@@ -156,7 +158,7 @@ func NewEgressPolicyVal4(egressIP, gatewayIP netip.Addr) EgressPolicyVal4 {
+ 	val := EgressPolicyVal4{}
+ 
+ 	val.EgressIP.FromAddr(egressIP)
+-	val.GatewayIP.FromAddr(gatewayIP)
++	val.GatewayIP[0].FromAddr(gatewayIP) // WARN: Only for compatability with sideoaded egress gateway
+ 
+ 	return val
+ }
+@@ -205,7 +207,7 @@ func (v *EgressPolicyVal4) GetEgressAddr() netip.Addr {
+ 
+ // GetGatewayIP returns the egress policy value's gateway IP.
+ func (v *EgressPolicyVal4) GetGatewayAddr() netip.Addr {
+-	return v.GatewayIP.Addr()
++	return v.GatewayIP[0].Addr() // WARN: Only for compatability with sideoaded egress gateway
+ }
+ 
+ // String returns the string representation of an egress policy value.

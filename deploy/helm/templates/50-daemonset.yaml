@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ws
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: watershed
+spec:
+  selector:
+    matchLabels:
+      app: watershed
+  template:
+    metadata:
+      labels:
+        app: watershed
+        checksum/values: {{ toJson .Values | sha256sum | trunc 63 }}
+    spec:
+      volumes:
+        - name: ws-config
+          configMap:
+            name: ws-config
+            items:
+              - key: ws.config.yaml
+                path: ws.config.yaml
+            defaultMode: 420
+        - name: bpf-maps
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: host-proc-sys-net
+          hostPath:
+            path: /proc/sys/net
+            type: Directory
+      containers:
+        - name: ws
+          image: >-
+            {{ .Values.image.registry }}/{{ default .Values.image.repository .Chart.Annotations.imagePath }}:{{ default .Values.image.tag .Chart.Annotations.imageTag }}{{ if .Chart.Annotations.imageDigest -}}@{{ .Chart.Annotations.imageDigest }}{{- end }}
+          args:
+            - /ws
+          env:
+            - name: WS_STARTUP_DELAY_SECONDS
+              value: {{ .Values.startupDelaySecods }}
+            - name: GOGC
+              value: '100'
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: ws-config
+              mountPath: /ws.config.yaml
+              subPath: ws.config.yaml
+            - name: bpf-maps
+              mountPath: /sys/fs/bpf
+              mountPropagation: HostToContainer
+            - name: host-proc-sys-net
+              mountPath: /host/proc/sys/net
+              mountPropagation: HostToContainer
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN    ## required for managing network
+                - PERFMON      ## required for loading fentry eBPF program
+                - IPC_LOCK     ## required for lock kernel memory for eBPF
+                - BPF          ## required for interactions with eBPF
+                - SYS_NICE     ## required to set high neceness for app itself
+                - FOWNER       ## required to bypass file permissions check without root
+                - DAC_OVERRIDE ## required to bypass file permissions check without root
+              drop:
+                - ALL
+            privileged: false
+            runAsUser: 0      ## required to override host-level kernel net parameters
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      serviceAccountName: firepaws-watershed
+      serviceAccount: firepaws-watershed
+      hostNetwork: true
+      hostPID: true
+      tolerations:
+        - operator: Exists
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0

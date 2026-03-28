@@ -1,0 +1,36 @@
+image:
+  registry: ""
+  repository: ""
+  pullPolicy: Always
+  tag: 1.0.0
+
+resources: {}
+#  limits:
+#    cpu: 100m
+#    memory: 128Mi
+#  requests:
+#    cpu: 50m
+#    memory: 64Mi
+
+startupDelaySeconds: 0 
+
+nodeSelector: {}
+# node-role.kubernetes.io/os: "linux"
+
+config: {}
+##    logLevel: 4 ## slog loglevel
+##    peerPort: 56453
+##    metricsPort: 9090
+##    terminationGracePeriod: 30s
+##    bgp:
+##      asn: 65450
+##      holdTime: 3s
+##      keepaliveIntervals: 3s
+##      connectRetry: 3s
+##      neighborList:
+##        - ip: "192.168.1.1"
+##          asn: 65735
+##          password: ""
+##        - ip: "192.168.0.1"
+##          asn: 65453
+##          password: ""

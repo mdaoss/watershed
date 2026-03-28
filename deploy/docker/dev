@@ -1,0 +1,35 @@
+# Build the manager binary
+FROM registry.access.redhat.com/ubi9/go-toolset:9.7
+
+COPY . /tmp/workspace
+
+USER 0
+
+WORKDIR /tmp/workspace
+
+RUN microdnf install -y clang libbpf-devel bpftool && microdnf clean all
+
+RUN ln -s /usr/include/bpf ./bpf/include/libbpf
+    # bpftool btf dump file /sys/kernel/btf/vmlinux format c >  ./bpf/include/linux/vmlinux.h && \
+
+
+# Build eBPF dataplane
+RUN clang -g -O2 -target bpf -I ./bpf -I ./bpf/include -c ./bpf/ws/ws.c  -o ./internal/bpfloader/bpfloader_x86_bpfel.o
+
+# Build watershed controlplane
+RUN  --mount=type=cache,target=/tmp/gomodcache \
+     --mount=type=cache,target=/tmp/gobuildcache \
+    GOMODCACHE=/tmp/gomodcache GOCACHE=/tmp/gobuildcache \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go -C /tmp/workspace build  -gcflags="all=-N -l" -buildvcs=false -a \
+    -o /tmp/ws ./cmd/ws
+
+
+FROM registry.access.redhat.com/ubi9/ubi:9.7
+
+COPY --from=builder /tmp/ws /ws
+COPY --from=builder /home/builder/go/bin/dlv /dlv
+
+USER 0
+
+ENTRYPOINT ["/dlv", "--headless=true", "--accept-multiclient", "--continue", "--listen=0.0.0.0:40000", "--api-version=2", "exec"]

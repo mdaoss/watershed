@@ -1,0 +1,61 @@
+/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
+/* Copyright Authors of Cilium */
+
+#pragma once
+
+#include "endian.h"
+#include "lib/fib.h"
+#include "lib/identity.h"
+#include "lib/jhash.h"
+#include "lib/overloadable.h"
+
+
+#define MAX_GW_CNT 2 // Max count of GW in BPF map
+
+/* These are special IP values in the CIDR 0.0.0.0/8 range that map to specific
+ * case for in the egress gateway policies handling.
+ */
+
+/* Special values in the policy_entry->gateway_ip: */
+#define EGRESS_GATEWAY_NO_GATEWAY (0)
+#define EGRESS_GATEWAY_EXCLUDED_CIDR_CONST (0x01000000)
+
+/* Special values in the policy_entry->egress_ip: */
+#define EGRESS_GATEWAY_NO_EGRESS_IP (0)
+
+
+// Returns the first value in a 3-element array that is not in the blacklist.
+// 'arr' is a fixed-length array of 3 integers.
+// Returns random available gateway
+static __always_inline __u32 get_ha_gateway(__u32 arr[MAX_GW_CNT], __be32 saddr __maybe_unused, __be32 daddr __maybe_unused) {
+
+  __u8  i; // index  for loop
+
+  __u32 leader_gw = EGRESS_GATEWAY_NO_GATEWAY;
+  
+  // Make verifier happy
+  volatile __u32 sarr[MAX_GW_CNT] = {};
+
+  // Make verifier happy
+  sarr[0] = arr[0];
+  sarr[1] = arr[1];
+
+
+
+
+
+    // Filtering non-working gateways on datapath level
+    #pragma unroll
+    for (i = 0; i < MAX_GW_CNT; i++) {
+        if (!(sarr[i] == EGRESS_GATEWAY_NO_GATEWAY ) && !(sarr[i] == EGRESS_GATEWAY_EXCLUDED_CIDR_CONST ))  {
+
+          if ( bpf_ntohl(sarr[i]) > bpf_ntohl(leader_gw)  ) {
+            leader_gw = sarr[i];
+          }
+
+        }
+    }
+
+
+return leader_gw;
+}
